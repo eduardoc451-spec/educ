@@ -1122,8 +1122,9 @@ def render_sidebar():
     if st.sidebar.button("🔄 Zerar Banco de Dados", use_container_width=True):
         try:
             with get_connection() as conn:
-                conn.execute("DELETE FROM respostas WHERE ano = ?", (ano_sel,))
-                conn.commit()
+                with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM respostas WHERE ano = %s;", (ano_sel,))
+            conn.commit()
             
             # Limpa chaves dinâmicas do formulário
             for chave in list(st.session_state.keys()):
