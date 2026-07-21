@@ -1115,7 +1115,7 @@ def render_sidebar():
     except Exception as e:
         st.sidebar.error(f"Falha ao compilar relatório PDF: {e}")
     
-    # -------------------------------------------------------------------------
+   # -------------------------------------------------------------------------
     # 🔄 ZERAR BANCO DE DADOS
     # -------------------------------------------------------------------------
     st.sidebar.markdown("---")
@@ -1123,8 +1123,8 @@ def render_sidebar():
         try:
             with get_connection() as conn:
                 with conn.cursor() as cursor:
-            cursor.execute("DELETE FROM respostas WHERE ano = %s;", (ano_sel,))
-            conn.commit()
+                    cursor.execute("DELETE FROM respostas WHERE ano = %s;", (ano_sel,))
+                conn.commit()
             
             # Limpa chaves dinâmicas do formulário
             for chave in list(st.session_state.keys()):
@@ -1165,13 +1165,14 @@ def mostrar_formulario_educ():
     
     st.title(f"📚 Auditoria i-EDUC - {ano_sel}")
     
-    # Botão de limpeza local no topo da página
+    # Botão de limpeza local no topo da página (Corrigido para Postgres)
     col_btn, _ = st.columns([1, 3])
     with col_btn:
         if st.button("🗑️ Limpar Todos os Campos", type="primary", use_container_width=True):
             try:
                 with get_connection() as conn:
-                    conn.execute("DELETE FROM respostas WHERE ano = ?", (ano_sel,))
+                    with conn.cursor() as cursor:
+                        cursor.execute("DELETE FROM respostas WHERE ano = %s;", (ano_sel,))
                     conn.commit()
                 
                 for chave in list(st.session_state.keys()):
