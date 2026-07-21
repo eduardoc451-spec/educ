@@ -7,33 +7,6 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import streamlit as st
 
-st.subheader("🔍 Diagnóstico de Conexão Neon")
-
-try:
-    conn = psycopg2.connect(st.secrets["postgres"]["url"])
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    
-    # 1. Mostra qual o Banco e Usuário o Streamlit está conectado no momento
-    cursor.execute("SELECT current_database(), current_user, current_schema();")
-    info = cursor.fetchone()
-    st.write("📌 **Informações da Conexão:**", info)
-    
-    # 2. Lista TODAS as tabelas e schemas disponíveis nesse banco
-    cursor.execute("""
-        SELECT table_schema, table_name 
-        FROM information_schema.tables 
-        WHERE table_schema NOT IN ('pg_catalog', 'information_schema');
-    """)
-    tabelas = cursor.fetchall()
-    
-    st.write("📋 **Tabelas encontradas pelo Streamlit:**")
-    st.dataframe(tabelas)
-    
-    conn.close()
-
-except Exception as e:
-    st.error(f"Erro na conexão: {e}")
-
 # =============================================================================
 # BIBLIOTECAS PARA O PDF (ReportLab)
 # =============================================================================
@@ -133,14 +106,19 @@ def modal_aviso_link(qid, links_encontrados):
     if st.button("Confirmo que o link está liberado para o público", key=f"btn_conf_{qid}"):
         st.rerun()
 
+import json
+import psycopg2
+from psycopg2.extras import RealDictCursor, Json
+import streamlit as st
+from datetime import datetime, date
+
 # =============================================================================
-# 1. FUNÇÕES DE APOIO E BANCO DE DADOS (ADAPTADAS PARA POSTGRESQL / NEON)
+# 1. FUNÇÕES DE APOIO E BANCO DE DADOS (POSTGRESQL / NEON)
 # =============================================================================
 
 def get_connection():
     """
-    Obtém conexão com o Neon PostgreSQL.
-    Lê as configurações da chave 'database' ou 'postgresql' nos secrets do Streamlit.
+    Obtém conexão com o Neon PostgreSQL a partir dos Secrets do Streamlit.
     """
     if "postgres" in st.secrets:
         return psycopg2.connect(st.secrets["postgres"]["url"])
@@ -153,7 +131,7 @@ def init_db():
     try:
         with get_connection() as conn:
             with conn.cursor() as cursor:
-                # Cria a tabela garantindo a PRIMARY KEY composta em (id, ano)
+                # 1. Cria a tabela garantindo a PRIMARY KEY composta em (id, ano)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS respostas (
                         id VARCHAR(50) NOT NULL,
@@ -168,7 +146,7 @@ def init_db():
                     );
                 """)
                 
-                # Garante a coluna comentarios para bancos legados
+                # 2. Garante a coluna comentarios para bancos legados
                 cursor.execute("""
                     ALTER TABLE respostas 
                     ADD COLUMN IF NOT EXISTS comentarios JSONB;
@@ -189,21 +167,22 @@ def load_respostas(ano):
                 rows = cursor.fetchall()
                 for row in rows:
                     comentarios_lista = []
-                    if row["comentarios"]:
-                        # No Postgres com tipo JSONB, o psycopg2 já decodifica para lista/dict Python automaticamente
-                        if isinstance(row["comentarios"], list):
-                            comentarios_lista = row["comentarios"]
-                        elif isinstance(row["comentarios"], str):
+                    raw_com = row["comentarios"]
+                    
+                    if raw_com:
+                        if isinstance(raw_com, list):
+                            comentarios_lista = raw_com
+                        elif isinstance(raw_com, str):
                             try:
-                                comentarios_lista = json.loads(row["comentarios"])
-                            except:
+                                comentarios_lista = json.loads(raw_com)
+                            except Exception:
                                 comentarios_lista = []
                                 
                     dados_ano[row["id"]] = {
                         "valor": row["valor"], 
                         "pontos": float(row["pontos"]) if row["pontos"] is not None else 0.0, 
                         "link": row["link"],
-                        "comentarios": comentarios_lista
+                        "comentarios": comentarios_lista if isinstance(comentarios_lista, list) else []
                     }
     except Exception as e:
         st.error(f"Erro ao carregar respostas do Postgres: {e}")
@@ -214,18 +193,18 @@ def save_resp(qid, valor, pontos, link, comentarios=None):
     if not ano_sel:
         return
     
-    comentarios_json = None
-    if comentarios is not None:
-        comentarios_json = json.dumps(comentarios, ensure_ascii=False)
-    else:
+    # Se os comentários não foram passados, recupera o histórico atual
+    if comentarios is None:
         dados_atuais = load_respostas(ano_sel)
         if qid in dados_atuais:
-            comentarios_json = json.dumps(dados_atuais[qid].get("comentarios", []), ensure_ascii=False)
+            comentarios = dados_atuais[qid].get("comentarios", [])
+        else:
+            comentarios = []
 
     try:
         with get_connection() as conn:
             with conn.cursor() as cursor:
-                # Usa sintaxe UPSERT nativa do PostgreSQL (ON CONFLICT)
+                # Usa Json(comentarios) para converter a lista Python nativamente para o JSONB do Postgres
                 query = """
                     INSERT INTO respostas (id, ano, valor, pontos, link, comentarios, atualizado_em) 
                     VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
@@ -236,153 +215,14 @@ def save_resp(qid, valor, pontos, link, comentarios=None):
                         comentarios = EXCLUDED.comentarios,
                         atualizado_em = CURRENT_TIMESTAMP;
                 """
-                cursor.execute(query, (qid, ano_sel, str(valor), float(pontos), str(link), comentarios_json))
+                cursor.execute(
+                    query, 
+                    (qid, ano_sel, str(valor), float(pontos), str(link), Json(comentarios))
+                )
                 conn.commit()
     except Exception as e:
         st.error(f"Erro ao salvar {qid} no Postgres: {e}")
-
-# --- BLOCO DE COMENTÁRIOS COM LIMPEZA, STATUS INDEPENDENTE E EXCLUSÃO ---
-def bloco_comentarios(questao_id, res_data, ano_sel=None):
-    """
-    Gera um bloco de diálogo direto com histórico retrátil.
-    A alteração do status (Pendente/Resolvido) grava direto no clique e independe de texto.
-    Permite exclusão individual de mensagens com atualização imediata do banco.
-    O campo de texto é limpo automaticamente após o envio do comentário.
-    """
-    if ano_sel is None:
-        ano_sel = st.session_state.get("ano_referencia_global", date.today().year)
-
-    usuario_atual = st.session_state.get("username", st.session_state.get("usuario", "Usuário Anônimo"))
-    
-    key_texto = f"v_txt_com_{questao_id}_{ano_sel}"
-    key_estado_limpar = f"limpar_input_{questao_id}_{ano_sel}"
-    
-    if key_estado_limpar not in st.session_state:
-        st.session_state[key_estado_limpar] = False
         
-    st.markdown("---")
-    
-    dados_questao = res_data.get(questao_id, {})
-    historico = dados_questao.get("comentarios", [])
-    
-    status_global = "Resolvido"
-    for com in historico:
-        if isinstance(com, dict) and "status_definido" in com:
-            status_global = com["status_definido"]
-            
-    badge_status = "🔴 PENDENTE" if status_global == "Pendente" else "🟢 RESOLVIDO"
-    
-    with st.expander(f"💬 Diálogo da Questão {questao_id} | Status: {badge_status}", expanded=(status_global == "Pendente")):
-        
-        st.markdown("<b style='font-size: 13px;'>Status Atual do Quesito:</b>", unsafe_allow_html=True)
-        opcoes_status = ["Resolvido", "Pendente"]
-        idx_status_atual = opcoes_status.index(status_global) if status_global in opcoes_status else 0
-        
-        novo_status_clicado = st.radio(
-            f"Definir status para {questao_id}:",
-            options=opcoes_status,
-            index=idx_status_atual,
-            horizontal=True,
-            key=f"rad_status_{questao_id}_{ano_sel}",
-            label_visibility="collapsed"
-        )
-        
-        if novo_status_clicado != status_global:
-            log_mudanca = {
-                "autor": "Sistema / " + usuario_atual,
-                "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                "texto": f"ℹ️ Alterou o status do quesito para: **{novo_status_clicado.upper()}**.",
-                "status_definido": novo_status_clicado
-            }
-            historico.append(log_mudanca)
-            save_resp(
-                qid=questao_id,
-                valor=dados_questao.get("valor", ""),
-                pontos=dados_questao.get("pontos", 0),
-                link=dados_questao.get("link", ""),
-                comentarios=historico
-            )
-            st.rerun()
-
-        st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
-
-        if historico:
-            for idx, com in enumerate(historico):
-                if not isinstance(com, dict):
-                    continue
-                col_balao, col_lixeira = st.columns([11, 1])
-                
-                with col_balao:
-                    if "Sistema /" in com.get('autor', ''):
-                        st.markdown(
-                            f"""
-                            <div style="background-color: #f1f3f5; padding: 6px 12px; border-radius: 6px; margin-bottom: 4px; border-left: 3px solid #ced4da;">
-                                <span style="font-size: 11px; color: #6c757d; font-style: italic;">{com.get('autor')} - {com.get('data')}</span>
-                                <p style="margin: 2px 0 0 0; font-size: 12px; color: #495057; font-style: italic;">{com.get('texto')}</p>
-                            </div>
-                            """, 
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.markdown(
-                            f"""
-                            <div style="background-color: #f8f9fa; padding: 10px 15px; border-radius: 8px; margin-bottom: 6px; border-left: 3px solid #1e88e5;">
-                                <span style="font-size: 11px; color: #1e88e5; font-weight: bold;">{com.get('autor')}</span> 
-                                <span style="font-size: 10px; color: #999; margin-left: 10px;">{com.get('data')}</span>
-                                <p style="margin: 4px 0 0 0; font-size: 13px; color: #333;">{com.get('texto')}</p>
-                            </div>
-                            """, 
-                            unsafe_allow_html=True
-                        )
-                
-                with col_lixeira:
-                    st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
-                    if st.button("🗑️", key=f"btn_del_com_{questao_id}_{idx}_{ano_sel}", help="Excluir este comentário"):
-                        historico.pop(idx)
-                        save_resp(
-                            qid=questao_id,
-                            valor=dados_questao.get("valor", ""),
-                            pontos=dados_questao.get("pontos", 0),
-                            link=dados_questao.get("link", ""),
-                            comentarios=historico
-                        )
-                        st.rerun()
-                        
-            st.markdown("<br>", unsafe_allow_html=True)
-        else:
-            st.markdown("<p style='font-size: 12px; color: #999; font-style: italic;'>Nenhum comentário enviado ainda.</p>", unsafe_allow_html=True)
-            
-        st.markdown("<b style='font-size: 13px;'>Adicionar Novo Comentário:</b>", unsafe_allow_html=True)
-        
-        if st.session_state[key_estado_limpar]:
-            st.session_state[key_texto] = ""
-            st.session_state[key_estado_limpar] = False
-            
-        novo_texto = st.text_area("Digite sua mensagem:", key=key_texto, height=80, label_visibility="collapsed")
-        
-        col_btn1, _ = st.columns([1, 3])
-        with col_btn1:
-            if st.button("Postar Comentário", key=f"btn_com_{questao_id}_{ano_sel}", type="primary"):
-                if novo_texto.strip():
-                    nova_mensagem = {
-                        "autor": usuario_atual,
-                        "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                        "texto": novo_texto.strip(),
-                        "status_definido": status_global
-                    }
-                    
-                    historico.append(nova_mensagem)
-                    
-                    save_resp(
-                        qid=questao_id, 
-                        valor=dados_questao.get("valor", ""), 
-                        pontos=dados_questao.get("pontos", 0), 
-                        link=dados_questao.get("link", ""),
-                        comentarios=historico
-                    )
-                    st.session_state[key_estado_limpar] = True
-                    st.rerun()
-
 # --- CENTRALIZADOR INTELIGENTE DE SALVAMENTO E MONITORAÇÃO DE LINKS ---
 def verificar_e_salvar_questao(qid, r_atual, l_atual, d_antigo, pontos=0):
     ano_sel = st.session_state.get("ano_referencia_global", 2026)
