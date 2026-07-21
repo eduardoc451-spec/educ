@@ -1,29 +1,157 @@
-import streamlit as st
-import pandas as pd
-from datetime import datetime
 import os
-import base64
 import sys
+import base64
+from datetime import datetime
+import pandas as pd
+import streamlit as st
 
-# Importa as funções compartilhadas a partir do módulo isolado database.py
+# Importa as funções de persistência do database.py
 from database import bloco_comentarios, save_resp
 
 # =============================================================================
 # BIBLIOTECAS PARA O PDF (ReportLab)
 # =============================================================================
-from reportlab.graphics.charts.barcharts import VerticalBarChart
-from reportlab.graphics.shapes import Drawing, String
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # =============================================================================
 # BIBLIOTECAS PARA OS GRÁFICOS (Plotly)
 # =============================================================================
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+
+def gerar_pdf_ieduc(respostas, usuario, ano):
+    """Gera um relatório sintético em PDF para o i-Educ."""
+    pdf_filename = f"Relatorio_iEduc_{ano}.pdf"
+    doc = SimpleDocTemplate(pdf_filename, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    story = []
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        'TitleStyle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        textColor=colors.HexColor('#001A4D'),
+        spaceAfter=12
+    )
+
+    story.append(Paragraph(f"Relatório i-Educ - Exercício {ano}", title_style))
+    story.append(Paragraph(f"<b>Usuário responsável:</b> {usuario}", styles['Normal']))
+    story.append(Paragraph(f"<b>Data de geração:</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    # Tabela com as respostas
+    data = [["Questão / Indicador", "Resposta / Valor"]]
+    for k, v in respostas.items():
+        data.append([str(k), str(v)])
+
+    t = Table(data, colWidths=[350, 150])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#001A4D')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+    ]))
+    
+    story.append(t)
+    doc.build(story)
+    return pdf_filename
+
+
+def mostrar_formulario_educ():
+    """Função principal invocada pelo main.py para exibir a dimensão i-Educ."""
+    st.header("🎓 i-Educ — Gestão da Educação Municipal")
+    st.write("Preencha as informações referentes à infraestrutura, vagas, vaga em creches e merenda escolar.")
+
+    usuario = st.session_state.get("username", "desconhecido")
+    ano = st.session_state.get("ano_referencia_global", 2026)
+
+    # Dicionário local para armazenar os campos do formulário
+    respostas_educ = {}
+
+    with st.form("form_ieduc"):
+        st.subheader("1. Cobertura de Vagas e Atendimento")
+        
+        q1 = st.radio(
+            "1.1. A rede municipal atende 100% da demanda de vagas em creches (0 a 3 anos)?",
+            ["Sim", "Não", "Em adequação"],
+            key="educ_q1"
+        )
+        respostas_educ["Demanda Creches 100%"] = q1
+
+        q2 = st.number_input(
+            "1.2. Quantidade total de alunos matriculados na Educação Infantil e Ensino Fundamental:",
+            min_value=0,
+            value=1000,
+            step=10,
+            key="educ_q2"
+        )
+        respostas_educ["Total Alunos Matriculados"] = q2
+
+        st.subheader("2. Infraestrutura Escolar e Nutrição")
+        
+        q3 = st.radio(
+            "2.1. Todas as escolas municipais possuem Auto de Vistoria do Corpo de Bombeiros (AVCB) válido?",
+            ["Sim", "Parcialmente", "Não"],
+            key="educ_q3"
+        )
+        respostas_educ["AVCB Escolas"] = q3
+
+        q4 = st.selectbox(
+            "2.2. Qual a frequência da avaliação do cardápio da merenda escolar por nutricionista habilitado?",
+            ["Semanal", "Mensal", "Trimestral", "Não possui acompanhamento regular"],
+            key="educ_q4"
+        )
+        respostas_educ["Acompanhamento Nutricional"] = q4
+
+        # Salvar respostas no banco
+        submitted = st.form_submit_button("💾 Salvar Respostas do i-Educ")
+        
+        if submitted:
+            for chave, valor in respostas_educ.items():
+                save_resp("i-Educ", ano, chave, str(valor), usuario)
+            st.success("✅ Respostas do i-Educ salvas com sucesso no banco de dados!")
+
+    st.markdown("---")
+
+    # Bloco de comentários padronizado
+    bloco_comentarios("i-Educ", ano, usuario)
+
+    st.markdown("---")
+    st.subheader("📊 Indicadores da Educação")
+
+    # Gráfico Exemplo com Plotly
+    df_chart = pd.DataFrame({
+        "Categoria": ["Atendidos", "Fila de Espera"],
+        "Quantidade": [respostas_educ.get("Total Alunos Matriculados", 1000), 150]
+    })
+    
+    fig = px.pie(
+        df_chart, 
+        values="Quantidade", 
+        names="Categoria", 
+        title="Distribuição de Vagas na Rede Municipal",
+        color_discrete_sequence=["#001A4D", "#FF4B4B"]
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Exportação de PDF
+    st.subheader("📄 Relatório do Módulo")
+    if st.button("📥 Gerar PDF do i-Educ"):
+        path_pdf = gerar_pdf_ieduc(respostas_educ, usuario, ano)
+        with open(path_pdf, "rb") as f:
+            st.download_button(
+                label="⬇️ Baixar Relatório PDF",
+                data=f,
+                file_name=path_pdf,
+                mime="application/pdf"
+            )
 
 # =============================================================================
 # CONSTANTES GLOBAIS i-EDUC (ADAPTADAS DO MODELO IGOV TI)
