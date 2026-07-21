@@ -1,6 +1,11 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+# Se a função está no arquivo main.py:
+from main import bloco_comentarios
+
+# OU se ela estiver em outro arquivo (ex: database.py ou utils.py):
+# from database import bloco_comentarios
 import os
 import base64
 import sys
