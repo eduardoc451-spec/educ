@@ -1,10 +1,12 @@
-from datetime import datetime, date
-from io import BytesIO
-import json
-import re
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import streamlit as st
+import pandas as pd
+from datetime import datetime
+import os
+import base64
+import sys
+
+# Importa as funções compartilhadas a partir do módulo isolado database.py
+from database import bloco_comentarios, save_resp
 
 # =============================================================================
 # BIBLIOTECAS PARA O PDF (ReportLab)
