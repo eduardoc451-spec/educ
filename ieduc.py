@@ -158,11 +158,18 @@ def init_db():
 
 def load_respostas(ano):
     dados_ano = {}
+    if ano is None:
+        ano = st.session_state.get("ano_referencia_global", 2026)
+        
     try:
+        # CORREÇÃO CHAVE: Força a conversão do ano para INTEGER
+        ano_int = int(ano)
+        
         with get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
-                    "SELECT id, valor, pontos, link, comentarios FROM respostas WHERE ano = %s", (ano,)
+                    "SELECT id, valor, pontos, link, comentarios FROM respostas WHERE ano = %s", 
+                    (ano_int,)
                 )
                 rows = cursor.fetchall()
                 for row in rows:
@@ -185,7 +192,7 @@ def load_respostas(ano):
                         "comentarios": comentarios_lista if isinstance(comentarios_lista, list) else []
                     }
     except Exception as e:
-        st.error(f"Erro ao carregar respostas do Postgres: {e}")
+        st.error(f"Erro ao carregar respostas do Postgres para o ano {ano}: {e}")
     return dados_ano
 
 def save_resp(qid, valor, pontos, link, comentarios=None):
@@ -193,9 +200,12 @@ def save_resp(qid, valor, pontos, link, comentarios=None):
     if not ano_sel:
         return
     
-    # Se os comentários não foram passados, recupera o histórico atual
+    # CORREÇÃO CHAVE: Converte explicitamente para int
+    ano_int = int(ano_sel)
+
+    # Se os comentários não foram passados, recupera o histórico atual do ano correto
     if comentarios is None:
-        dados_atuais = load_respostas(ano_sel)
+        dados_atuais = load_respostas(ano_int)
         if qid in dados_atuais:
             comentarios = dados_atuais[qid].get("comentarios", [])
         else:
@@ -204,7 +214,6 @@ def save_resp(qid, valor, pontos, link, comentarios=None):
     try:
         with get_connection() as conn:
             with conn.cursor() as cursor:
-                # Usa Json(comentarios) para converter a lista Python nativamente para o JSONB do Postgres
                 query = """
                     INSERT INTO respostas (id, ano, valor, pontos, link, comentarios, atualizado_em) 
                     VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
@@ -217,15 +226,15 @@ def save_resp(qid, valor, pontos, link, comentarios=None):
                 """
                 cursor.execute(
                     query, 
-                    (qid, ano_sel, str(valor), float(pontos), str(link), Json(comentarios))
+                    (qid, ano_int, str(valor), float(pontos), str(link), Json(comentarios))
                 )
                 conn.commit()
     except Exception as e:
-        st.error(f"Erro ao salvar {qid} no Postgres: {e}")
-        
+        st.error(f"Erro ao salvar {qid} para o ano {ano_int} no Postgres: {e}")
+
 # --- CENTRALIZADOR INTELIGENTE DE SALVAMENTO E MONITORAÇÃO DE LINKS ---
 def verificar_e_salvar_questao(qid, r_atual, l_atual, d_antigo, pontos=0):
-    ano_sel = st.session_state.get("ano_referencia_global", 2026)
+    ano_sel = int(st.session_state.get("ano_referencia_global", 2026))
     
     links_atuais = re.findall(r'(https?://[^\s]+)', l_atual or "")
     links_antigos = re.findall(r'(https?://[^\s]+)', d_antigo.get("link", "") or "")
@@ -244,10 +253,6 @@ def verificar_e_salvar_questao(qid, r_atual, l_atual, d_antigo, pontos=0):
         modal_aviso_link(qid, links_salvos)
 
 def load_todas_respostas():
-    """
-    Busca as respostas de TODOS os anos registrados no banco de dados Neon
-    e consolida no formato que a tabela comparativa exige.
-    """
     todas_respostas = {}
     try:
         with get_connection() as conn:
@@ -269,7 +274,6 @@ def load_todas_respostas():
     except Exception as e:
         st.error(f"Erro ao carregar histórico consolidado do Postgres: {e}")
     return todas_respostas
-
 # =============================================================================
 # 2. LÓGICA DE CÁLCULO
 # =============================================================================
