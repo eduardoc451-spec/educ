@@ -1,3 +1,4 @@
+import copy
 import streamlit as st
 import psycopg2
 from psycopg2.extras import RealDictCursor
