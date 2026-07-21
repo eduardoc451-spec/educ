@@ -1,4 +1,5 @@
 from datetime import datetime, date
+from main import bloco_comentarios
 from io import BytesIO
 import json
 import re
