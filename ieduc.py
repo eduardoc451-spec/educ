@@ -112,28 +112,44 @@ def modal_aviso_link(qid, links_encontrados):
     if st.button("Confirmo que o link está liberado para o público", key=f"btn_conf_{qid}"):
         st.rerun()
 
+import os
+import psycopg2
+import streamlit as st
+
 # =============================================================================
-# 1. FUNÇÕES DE APOIO E BANCO DE DADOS (POSTGRESQL ADAPTADO)
+# 1. FUNÇÕES DE APOIO E BANCO DE DADOS (POSTGRESQL NEON ADAPTADO)
 # =============================================================================
+
+# Fallback para a URL da Neon (com sslmode obrigatório)
+NEON_DATABASE_URL = "postgresql://neondb_owner:npg_v0UQwoJWC8dg@ep-damp-darkness-auujcvq1-pooler.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require"
 
 def get_connection():
     """
     Retorna uma nova conexão ativa com o servidor PostgreSQL.
-    Obtém os parâmetros do .streamlit/secrets.toml.
+    Tenta priorizar st.secrets e variáveis de ambiente, caindo na URL da Neon como fallback.
     """
-    return psycopg2.connect(
-        host=st.secrets.get("DB_HOST", "localhost"),
-        port=st.secrets.get("DB_PORT", 5432),
-        database=st.secrets.get("DB_NAME", "ieduc_db"),
-        user=st.secrets.get("DB_USER", "postgres"),
-        password=st.secrets.get("DB_PASSWORD", "postgres")
+    # 1. Busca a URL completa de conexão no Streamlit Secrets ou Variáveis de Ambiente
+    db_url = (
+        st.secrets.get("DATABASE_URL") 
+        or st.secrets.get("postgres", {}).get("url") 
+        or os.getenv("DATABASE_URL") 
+        or NEON_DATABASE_URL
     )
+    
+    # Garantia de que a URL possui a flag de SSL necessária para bancos em nuvem como a Neon
+    if "sslmode" not in db_url:
+        separador = "&" if "?" in db_url else "?"
+        db_url += f"{separador}sslmode=require"
+        
+    return psycopg2.connect(db_url)
+
 
 def init_db():
     """Inicializa a tabela de respostas e a coluna JSON de comentários no PostgreSQL."""
     try:
         with get_connection() as conn:
             with conn.cursor() as cursor:
+                # Cria a tabela caso não exista
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS respostas (
                         id VARCHAR(50) NOT NULL,
@@ -147,7 +163,8 @@ def init_db():
                         PRIMARY KEY (id, ano)
                     );
                 """)
-                # Garante que a coluna de comentários exista
+                
+                # Garante que a coluna de comentários exista caso a tabela já tenha sido criada antes
                 cursor.execute("""
                     ALTER TABLE respostas ADD COLUMN IF NOT EXISTS comentarios TEXT;
                 """)
