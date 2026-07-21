@@ -1078,22 +1078,23 @@ def render_sidebar():
     historico_tratado = {}
     try:
         with get_connection() as conn:
-            cursor = conn.execute("SELECT ano, id, pontos FROM respostas")
-            for row in cursor.fetchall():
-                try:
-                    if row[0] is None or row[1] is None:
-                        continue
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT ano, id, pontos FROM respostas")
+                for row in cursor.fetchall():
+                    try:
+                        if row[0] is None or row[1] is None:
+                            continue
+                            
+                        ano_db = int(str(row[0]).strip()[:4])
+                        qid = str(row[1])
+                        pontos_item = float(row[2]) if row[2] is not None else 0.0
                         
-                    ano_db = int(str(row[0]).strip()[:4])
-                    qid = str(row[1])
-                    pontos_item = float(row[2]) if row[2] is not None else 0.0
-                    
-                    if ano_db not in historico_tratado:
-                        historico_tratado[ano_db] = {}
-                    
-                    historico_tratado[ano_db][qid] = {"pontos": pontos_item}
-                except (ValueError, TypeError, IndexError):
-                    continue
+                        if ano_db not in historico_tratado:
+                            historico_tratado[ano_db] = {}
+                        
+                        historico_tratado[ano_db][qid] = {"pontos": pontos_item}
+                    except (ValueError, TypeError, IndexError):
+                        continue
     except Exception as e:
         st.sidebar.error(f"Erro ao carregar histórico: {e}")
 
