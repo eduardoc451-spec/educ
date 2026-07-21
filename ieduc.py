@@ -1,9 +1,10 @@
 import re
 import streamlit as st
-import sqlite3
 import json
 from io import BytesIO
 from datetime import datetime, date
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # =============================================================================
 # BIBLIOTECAS PARA O PDF (ReportLab)
@@ -58,31 +59,24 @@ CATEGORIAS_MAP = {
 }
 
 PONTUACOES_MAX = {
-    # 1.0 Creche
     "1.1.1": 2, "1.1.2": 3, "1.2.1.1": 5, "1.2.2": 5, "1.3": 10, "1.4": 18, "1.7.1": 7, "1.8": 3, 
     "1.9": 2, "1.10": 2, "1.11": 18, "1.11.1": 18, "1.12": 18, "1.12.1": 18, "1.13": 50, "1.15": 10,
     
-    # 2.0 Pré-escola
     "2.1.1": 2, "2.1.2": 3, "2.2.1.1": 5, "2.2.2": 5, "2.3": 10, "2.4": 18, "2.7.1": 7, "2.8": 3, 
     "2.9": 2, "2.10": 2, "2.11": 18, "2.11.1": 18, "2.12": 18, "2.12.1": 18, "2.13": 50, "2.15": 10,
     
-    # 3.0 Ensino Fundamental
     "3.1": 10, "3.2": 19, "3.5.1": 7, "3.6": 3, "3.7": 2, "3.8": 2, "3.10": 12, "3.11": 2, 
     "3.12": 20, "3.12.1": 20, "3.13.1": 20, "3.14.1": 20, "3.15.3.1": 18, "3.15.4.1": 18, "3.16": 20, 
     "3.19": 10, "3.20": 2.5, "3.23": 25,
     
-    # 5.0 a 12.0 Infraestrutura, Gestão e Merenda
     "5.0": 75, "7.0": 5, "8.1": 12, "9.0": 2, "11.1": 2, "12.1": 6,
     
-    # 14.0 a 19.0 Planos, Conselhos e Operação
     "14.3": 20, "14.3.1": 30, "16.1": 3, "16.2": 3, "16.3": 6, "16.5": 3, "17.3.1": 2, 
     "17.4": 3, "17.5": 6, "17.7": 3, "18.1": 3, "18.2": 6, "18.3.1": 6, "19.3": 2,
     
-    # Bloco Especial E1 e E2
     "E1.1": 2, "E1.2": 4, "E1.5": 6, "E1.6": 2, "E1.8": 12.5, "E1.9": 12.5,
     "E2.1": 2, "E2.2": 4, "E2.5": 6, "E2.6": 2, "E2.8": 12.5, "E2.9": 12.5,
     
-    # Bloco Especial E3, E5, E6, E7 e E13
     "E3.3": 6, "E3.4": 12, "E3.5": 2, "E3.9": 12.5, "E3.10": 12.5,
     "E13.1": 18, "E.13.2": 18, "E13.3": 38, "E5": 75, "E6": 5, "E7": 5
 }
@@ -112,57 +106,72 @@ def modal_aviso_link(qid, links_encontrados):
         st.rerun()
 
 # =============================================================================
-# 1. FUNÇÕES DE APOIO E BANCO DE DADOS
+# 1. FUNÇÕES DE APOIO E BANCO DE DADOS (ADAPTADAS PARA POSTGRESQL / NEON)
 # =============================================================================
 
 def get_connection():
-    return sqlite3.connect("dados_ieduc.db", check_same_thread=False)
+    """
+    Obtém conexão com o Neon PostgreSQL.
+    Lê as configurações da chave 'database' ou 'postgresql' nos secrets do Streamlit.
+    """
+    if "postgres" in st.secrets:
+        return psycopg2.connect(st.secrets["postgres"]["url"])
+    elif "connections" in st.secrets and "postgresql" in st.secrets["connections"]:
+        return psycopg2.connect(st.secrets["connections"]["postgresql"]["url"])
+    else:
+        raise ValueError("Configuração do PostgreSQL não encontrada em .streamlit/secrets.toml!")
 
 def init_db():
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS respostas (
-                id TEXT NOT NULL,
-                ano INTEGER NOT NULL,
-                valor TEXT,
-                pontos REAL DEFAULT 0,
-                link TEXT,
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (id, ano)
-            )
-        """)
-        # Adiciona a coluna de comentários dinamicamente caso ela não exista na tabela legado
-        try:
-            cursor.execute("ALTER TABLE respostas ADD COLUMN comentarios TEXT")
-        except sqlite3.OperationalError:
-            pass
-        conn.commit()
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cursor:
+                # Tabela adaptada para PostgreSQL
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS respostas (
+                        id VARCHAR(50) NOT NULL,
+                        ano INTEGER NOT NULL,
+                        valor TEXT,
+                        pontos DOUBLE PRECISION DEFAULT 0,
+                        link TEXT,
+                        comentarios JSONB,
+                        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (id, ano)
+                    );
+                """)
+                conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao inicializar o banco de dados no Postgres: {e}")
 
 def load_respostas(ano):
     dados_ano = {}
     try:
         with get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT id, valor, pontos, link, comentarios FROM respostas WHERE ano = ?", (ano,)
-            )
-            for row in cursor.fetchall():
-                comentarios_lista = []
-                if row[4]:
-                    try:
-                        comentarios_lista = json.loads(row[4])
-                    except:
-                        comentarios_lista = []
-                        
-                dados_ano[row[0]] = {
-                    "valor": row[1], 
-                    "pontos": row[2], 
-                    "link": row[3],
-                    "comentarios": comentarios_lista
-                }
-    except Exception:
-        pass
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    "SELECT id, valor, pontos, link, comentarios FROM respostas WHERE ano = %s", (ano,)
+                )
+                rows = cursor.fetchall()
+                for row in rows:
+                    comentarios_lista = []
+                    if row["comentarios"]:
+                        # No Postgres com tipo JSONB, o psycopg2 já decodifica para lista/dict Python automaticamente
+                        if isinstance(row["comentarios"], list):
+                            comentarios_lista = row["comentarios"]
+                        elif isinstance(row["comentarios"], str):
+                            try:
+                                comentarios_lista = json.loads(row["comentarios"])
+                            except:
+                                comentarios_lista = []
+                                
+                    dados_ano[row["id"]] = {
+                        "valor": row["valor"], 
+                        "pontos": float(row["pontos"]) if row["pontos"] is not None else 0.0, 
+                        "link": row["link"],
+                        "comentarios": comentarios_lista
+                    }
+    except Exception as e:
+        st.error(f"Erro ao carregar respostas do Postgres: {e}")
     return dados_ano
 
 def save_resp(qid, valor, pontos, link, comentarios=None):
@@ -174,20 +183,28 @@ def save_resp(qid, valor, pontos, link, comentarios=None):
     if comentarios is not None:
         comentarios_json = json.dumps(comentarios, ensure_ascii=False)
     else:
-        # Mantém os comentários antigos intactos caso esteja atualizando apenas campos de valores do form principal
         dados_atuais = load_respostas(ano_sel)
         if qid in dados_atuais:
             comentarios_json = json.dumps(dados_atuais[qid].get("comentarios", []), ensure_ascii=False)
 
     try:
         with get_connection() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO respostas (id, ano, valor, pontos, link, comentarios, atualizado_em) 
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (qid, ano_sel, str(valor), float(pontos), str(link), comentarios_json))
-            conn.commit()
+            with conn.cursor() as cursor:
+                # Usa sintaxe UPSERT nativa do PostgreSQL (ON CONFLICT)
+                query = """
+                    INSERT INTO respostas (id, ano, valor, pontos, link, comentarios, atualizado_em) 
+                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (id, ano) DO UPDATE SET
+                        valor = EXCLUDED.valor,
+                        pontos = EXCLUDED.pontos,
+                        link = EXCLUDED.link,
+                        comentarios = EXCLUDED.comentarios,
+                        atualizado_em = CURRENT_TIMESTAMP;
+                """
+                cursor.execute(query, (qid, ano_sel, str(valor), float(pontos), str(link), comentarios_json))
+                conn.commit()
     except Exception as e:
-        st.error(f"Erro ao salvar {qid}: {e}")
+        st.error(f"Erro ao salvar {qid} no Postgres: {e}")
 
 # --- BLOCO DE COMENTÁRIOS COM LIMPEZA, STATUS INDEPENDENTE E EXCLUSÃO ---
 def bloco_comentarios(questao_id, res_data, ano_sel=None):
@@ -197,14 +214,11 @@ def bloco_comentarios(questao_id, res_data, ano_sel=None):
     Permite exclusão individual de mensagens com atualização imediata do banco.
     O campo de texto é limpo automaticamente após o envio do comentário.
     """
-    import datetime
-
     if ano_sel is None:
-        ano_sel = st.session_state.get("ano_referencia_global", datetime.date.today().year)
+        ano_sel = st.session_state.get("ano_referencia_global", date.today().year)
 
     usuario_atual = st.session_state.get("username", st.session_state.get("usuario", "Usuário Anônimo"))
     
-    # Inicializa as chaves de controle de estado para esta questão se não existirem
     key_texto = f"v_txt_com_{questao_id}_{ano_sel}"
     key_estado_limpar = f"limpar_input_{questao_id}_{ano_sel}"
     
@@ -216,22 +230,18 @@ def bloco_comentarios(questao_id, res_data, ano_sel=None):
     dados_questao = res_data.get(questao_id, {})
     historico = dados_questao.get("comentarios", [])
     
-    # 1. Identifica o status GLOBAL atual do quesito olhando o histórico
     status_global = "Resolvido"
     for com in historico:
-        if "status_definido" in com:
+        if isinstance(com, dict) and "status_definido" in com:
             status_global = com["status_definido"]
             
-    # Configura o Badge Visual Superior
     badge_status = "🔴 PENDENTE" if status_global == "Pendente" else "🟢 RESOLVIDO"
     
-    # --- RECURSO: OCULTAR/EXPANDIR COMENTÁRIOS ---
     with st.expander(f"💬 Diálogo da Questão {questao_id} | Status: {badge_status}", expanded=(status_global == "Pendente")):
         
-        # --- SEÇÃO 1: GERENCIADOR DE STATUS INDEPENDENTE (Grava Direto no Clique) ---
         st.markdown("<b style='font-size: 13px;'>Status Atual do Quesito:</b>", unsafe_allow_html=True)
         opcoes_status = ["Resolvido", "Pendente"]
-        idx_status_atual = opcoes_status.index(status_global)
+        idx_status_atual = opcoes_status.index(status_global) if status_global in opcoes_status else 0
         
         novo_status_clicado = st.radio(
             f"Definir status para {questao_id}:",
@@ -242,11 +252,10 @@ def bloco_comentarios(questao_id, res_data, ano_sel=None):
             label_visibility="collapsed"
         )
         
-        # Se o usuário mudou o botão de status, grava IMEDIATAMENTE no banco
         if novo_status_clicado != status_global:
             log_mudanca = {
                 "autor": "Sistema / " + usuario_atual,
-                "data": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
                 "texto": f"ℹ️ Alterou o status do quesito para: **{novo_status_clicado.upper()}**.",
                 "status_definido": novo_status_clicado
             }
@@ -262,20 +271,19 @@ def bloco_comentarios(questao_id, res_data, ano_sel=None):
 
         st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
 
-        # --- SEÇÃO 2: HISTÓRICO DE DIÁLOGOS COM OPÇÃO DE EXCLUIR ---
         if historico:
             for idx, com in enumerate(historico):
-                # Cria duas colunas: uma larga para o balão e uma estreita para o botão de apagar
+                if not isinstance(com, dict):
+                    continue
                 col_balao, col_lixeira = st.columns([11, 1])
                 
                 with col_balao:
-                    # Se for mensagem de sistema coloca um estilo mais discreto/itálico
-                    if "Sistema /" in com['autor']:
+                    if "Sistema /" in com.get('autor', ''):
                         st.markdown(
                             f"""
                             <div style="background-color: #f1f3f5; padding: 6px 12px; border-radius: 6px; margin-bottom: 4px; border-left: 3px solid #ced4da;">
-                                <span style="font-size: 11px; color: #6c757d; font-style: italic;">{com['autor']} - {com['data']}</span>
-                                <p style="margin: 2px 0 0 0; font-size: 12px; color: #495057; font-style: italic;">{com['texto']}</p>
+                                <span style="font-size: 11px; color: #6c757d; font-style: italic;">{com.get('autor')} - {com.get('data')}</span>
+                                <p style="margin: 2px 0 0 0; font-size: 12px; color: #495057; font-style: italic;">{com.get('texto')}</p>
                             </div>
                             """, 
                             unsafe_allow_html=True
@@ -284,22 +292,18 @@ def bloco_comentarios(questao_id, res_data, ano_sel=None):
                         st.markdown(
                             f"""
                             <div style="background-color: #f8f9fa; padding: 10px 15px; border-radius: 8px; margin-bottom: 6px; border-left: 3px solid #1e88e5;">
-                                <span style="font-size: 11px; color: #1e88e5; font-weight: bold;">{com['autor']}</span> 
-                                <span style="font-size: 10px; color: #999; margin-left: 10px;">{com['data']}</span>
-                                <p style="margin: 4px 0 0 0; font-size: 13px; color: #333;">{com['texto']}</p>
+                                <span style="font-size: 11px; color: #1e88e5; font-weight: bold;">{com.get('autor')}</span> 
+                                <span style="font-size: 10px; color: #999; margin-left: 10px;">{com.get('data')}</span>
+                                <p style="margin: 4px 0 0 0; font-size: 13px; color: #333;">{com.get('texto')}</p>
                             </div>
                             """, 
                             unsafe_allow_html=True
                         )
                 
                 with col_lixeira:
-                    # Botão pequeno de lixeira alinhado verticalmente com o comentário
                     st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
                     if st.button("🗑️", key=f"btn_del_com_{questao_id}_{idx}_{ano_sel}", help="Excluir este comentário"):
-                        # Remove o item selecionado da lista
                         historico.pop(idx)
-                        
-                        # Salva a lista atualizada de volta no banco
                         save_resp(
                             qid=questao_id,
                             valor=dados_questao.get("valor", ""),
@@ -313,7 +317,6 @@ def bloco_comentarios(questao_id, res_data, ano_sel=None):
         else:
             st.markdown("<p style='font-size: 12px; color: #999; font-style: italic;'>Nenhum comentário enviado ainda.</p>", unsafe_allow_html=True)
             
-        # --- SEÇÃO 3: ENVIO DE COMENTÁRIO (Com limpeza automática de caixa) ---
         st.markdown("<b style='font-size: 13px;'>Adicionar Novo Comentário:</b>", unsafe_allow_html=True)
         
         if st.session_state[key_estado_limpar]:
@@ -328,9 +331,9 @@ def bloco_comentarios(questao_id, res_data, ano_sel=None):
                 if novo_texto.strip():
                     nova_mensagem = {
                         "autor": usuario_atual,
-                        "data": datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+                        "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
                         "texto": novo_texto.strip(),
-                        "status_definido": status_global  # Preserva o status que já estava ativo
+                        "status_definido": status_global
                     }
                     
                     historico.append(nova_mensagem)
@@ -352,7 +355,7 @@ def verificar_e_salvar_questao(qid, r_atual, l_atual, d_antigo, pontos=0):
     links_atuais = re.findall(r'(https?://[^\s]+)', l_atual or "")
     links_antigos = re.findall(r'(https?://[^\s]+)', d_antigo.get("link", "") or "")
 
-    if r_atual and (r_atual != d_antigo["valor"] or l_atual != d_antigo["link"]):
+    if r_atual and (r_atual != d_antigo.get("valor") or l_atual != d_antigo.get("link")):
         if set(links_atuais) > set(links_antigos):
             st.session_state[f"trigger_modal_{qid}_{ano_sel}"] = True
             st.session_state[f"links_detectados_{qid}_{ano_sel}"] = links_atuais
@@ -367,28 +370,29 @@ def verificar_e_salvar_questao(qid, r_atual, l_atual, d_antigo, pontos=0):
 
 def load_todas_respostas():
     """
-    Busca as respostas de TODOS os anos registrados no banco de dados 
-    e consolida no formato que a tabela comparativa do PDF exige.
+    Busca as respostas de TODOS os anos registrados no banco de dados Neon
+    e consolida no formato que a tabela comparativa exige.
     """
     todas_respostas = {}
     try:
         with get_connection() as conn:
-            cursor = conn.execute("SELECT ano, id, valor, pontos, link FROM respostas")
-            for row in cursor.fetchall():
-                ano_db = int(row[0])
-                qid = row[1]
-                
-                if ano_db not in todas_respostas:
-                    todas_respostas[ano_db] = {}
-                
-                # Garante que os pontos sejam convertidos para float nativo aqui
-                todas_respostas[ano_db][qid] = {
-                    "valor": row[2],
-                    "pontos": float(row[3]) if row[3] is not None else 0.0,
-                    "link": row[4]
-                }
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT ano, id, valor, pontos, link FROM respostas")
+                rows = cursor.fetchall()
+                for row in rows:
+                    ano_db = int(row["ano"])
+                    qid = row["id"]
+                    
+                    if ano_db not in todas_respostas:
+                        todas_respostas[ano_db] = {}
+                    
+                    todas_respostas[ano_db][qid] = {
+                        "valor": row["valor"],
+                        "pontos": float(row["pontos"]) if row["pontos"] is not None else 0.0,
+                        "link": row["link"]
+                    }
     except Exception as e:
-        print(f"Erro ao carregar histórico consolidado: {e}")
+        st.error(f"Erro ao carregar histórico consolidado do Postgres: {e}")
     return todas_respostas
 
 # =============================================================================
@@ -437,9 +441,8 @@ def calcular_pontos_rotatividade(n1, n2, n3, n4, pmax=3):
     if total <= 0: return 0
     return ( (pmax * n1) + (2 * n2) + (1 * n3) + (0 * n4) ) / total
 
-import copy
-from io import BytesIO
-# Certifique-se de manter os demais imports do ReportLab ativos no topo do arquivo
+# Executa a inicialização do banco ao carregar o script
+init_db()
 
 # =============================================================================
 # 2. GERADOR DO RELATÓRIO PDF (VERSÃO CAIXA PRETA ISOLADA)
