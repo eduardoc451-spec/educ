@@ -1,10 +1,10 @@
-from io import BytesIO  # <-- Adicione esta linha no topo do ieduc.py
+from io import BytesIO
 import copy
 import re
 import json
 from datetime import datetime, date
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 import streamlit as st
 
 # =============================================================================
@@ -106,12 +106,6 @@ def modal_aviso_link(qid, links_encontrados):
     if st.button("Confirmo que o link está liberado para o público", key=f"btn_conf_{qid}"):
         st.rerun()
 
-import json
-import psycopg2
-from psycopg2.extras import RealDictCursor, Json
-import streamlit as st
-from datetime import datetime, date
-
 # =============================================================================
 # 1. FUNÇÕES DE APOIO E BANCO DE DADOS (POSTGRESQL / NEON)
 # =============================================================================
@@ -162,7 +156,6 @@ def load_respostas(ano):
         ano = st.session_state.get("ano_referencia_global", 2026)
         
     try:
-        # CORREÇÃO CHAVE: Força a conversão do ano para INTEGER
         ano_int = int(ano)
         
         with get_connection() as conn:
@@ -200,7 +193,6 @@ def save_resp(qid, valor, pontos, link, comentarios=None):
     if not ano_sel:
         return
     
-    # CORREÇÃO CHAVE: Converte explicitamente para int
     ano_int = int(ano_sel)
 
     # Se os comentários não foram passados, recupera o histórico atual do ano correto
@@ -325,7 +317,7 @@ def calcular_pontos_rotatividade(n1, n2, n3, n4, pmax=3):
 init_db()
 
 # =============================================================================
-# 2. GERADOR DO RELATÓRIO PDF (VERSÃO CAIXA PRETA ISOLADA)
+# 3. GERADOR DO RELATÓRIO PDF (VERSÃO CAIXA PRETA ISOLADA)
 # =============================================================================
 
 def gerar_relatorio_pdf(dados_brutos, ano, total, faixa, all_data=None):
@@ -653,6 +645,7 @@ def gerar_relatorio_pdf(dados_brutos, ano, total, faixa, all_data=None):
     # -------------------------------------------------------------------------
     # 4. ALINHAMENTO COM A AGENDA 2030 (METAS ODS)
     # -------------------------------------------------------------------------
+   
     elements.append(Paragraph("<b>5. ALINHAMENTO COM A AGENDA 2030 (METAS ODS / ONU)</b>", styles["h2"]))
     elements.append(Spacer(1, 6))
     
