@@ -1,15 +1,19 @@
-import streamlit as st
-import pandas as pd
-from datetime import datetime
-from database import init_db, bloco_comentarios, save_resp
 import os
-import base64
 import sys
 
-# Força o interpretador a enxergar a pasta atual para evitar erros de importação dos módulos locais
+# 1. FORÇA O PYTHON A ENXERGAR OS MÓDULOS LOCAIS PRIMEIRO
 current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else os.getcwd()
 if current_dir not in sys.path:
     sys.path.append(current_dir)
+
+# 2. IMPORTS PADRÃO
+import base64
+from datetime import datetime
+import pandas as pd
+import streamlit as st
+
+# 3. IMPORTS DE MÓDULOS LOCAIS (Agora funciona com segurança)
+from database import init_db, bloco_comentarios, save_resp
 
 # Importar módulos locais com tratamento de erros dinâmico
 def import_local_module(module_name):
