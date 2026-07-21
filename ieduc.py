@@ -1,10 +1,33 @@
-import re
 import streamlit as st
-import json
-from io import BytesIO
-from datetime import datetime, date
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+st.subheader("🔍 Diagnóstico de Conexão Neon")
+
+try:
+    conn = psycopg2.connect(st.secrets["postgres"]["url"])
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # 1. Mostra qual o Banco e Usuário o Streamlit está conectado no momento
+    cursor.execute("SELECT current_database(), current_user, current_schema();")
+    info = cursor.fetchone()
+    st.write("📌 **Informações da Conexão:**", info)
+    
+    # 2. Lista TODAS as tabelas e schemas disponíveis nesse banco
+    cursor.execute("""
+        SELECT table_schema, table_name 
+        FROM information_schema.tables 
+        WHERE table_schema NOT IN ('pg_catalog', 'information_schema');
+    """)
+    tabelas = cursor.fetchall()
+    
+    st.write("📋 **Tabelas encontradas pelo Streamlit:**")
+    st.dataframe(tabelas)
+    
+    conn.close()
+
+except Exception as e:
+    st.error(f"Erro na conexão: {e}")
 
 # =============================================================================
 # BIBLIOTECAS PARA O PDF (ReportLab)
