@@ -1,0 +1,133 @@
+# database.py
+import os
+import json
+import re
+from datetime import datetime
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from psycopg2.pool import SimpleConnectionPool
+import streamlit as st
+
+@st.cache_resource
+def init_connection_pool():
+    db_url = (
+        st.secrets.get("DATABASE_URL") 
+        or st.secrets.get("postgres", {}).get("url") 
+        or os.getenv("DATABASE_URL")
+    )
+    if not db_url:
+        st.error("URL do Banco de Dados não configurada.")
+        st.stop()
+    if "sslmode" not in db_url:
+        separador = "&" if "?" in db_url else "?"
+        db_url += f"{separador}sslmode=require"
+    return SimpleConnectionPool(minconn=1, maxconn=10, dsn=db_url)
+
+def execute_query(query, params=(), fetch=False):
+    pool = init_connection_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query, params)
+            if fetch:
+                resultado = cursor.fetchall()
+            else:
+                conn.commit()
+                resultado = None
+        return resultado
+    finally:
+        pool.putconn(conn)
+
+def save_resp(qid, valor, pontos, link, comentarios=None):
+    ano_sel = st.session_state.get("ano_referencia_global")
+    if not ano_sel:
+        return
+    comentarios_json = json.dumps(comentarios, ensure_ascii=False) if comentarios is not None else None
+    query = """
+        INSERT INTO respostas (id, ano, valor, pontos, link, comentarios, atualizado_em)
+        VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (id, ano) DO UPDATE SET
+            valor = EXCLUDED.valor,
+            pontos = EXCLUDED.pontos,
+            link = EXCLUDED.link,
+            comentarios = COALESCE(EXCLUDED.comentarios, respostas.comentarios),
+            atualizado_em = CURRENT_TIMESTAMP;
+    """
+    try:
+        execute_query(query, (
+            str(qid), int(ano_sel), str(valor) if valor is not None else "",
+            float(pontos or 0.0), str(link) if link is not None else "", comentarios_json
+        ))
+    except Exception as e:
+        st.error(f"Erro ao salvar questão {qid}: {e}")
+
+def bloco_comentarios(questao_id, res_data, ano_sel=None):
+    if ano_sel is None:
+        ano_sel = st.session_state.get("ano_referencia_global", datetime.now().year)
+
+    usuario_atual = st.session_state.get("username", st.session_state.get("usuario", "Usuário Anônimo"))
+    key_texto = f"v_txt_com_{questao_id}_{ano_sel}"
+    key_estado_limpar = f"limpar_input_{questao_id}_{ano_sel}"
+    
+    if key_estado_limpar not in st.session_state:
+        st.session_state[key_estado_limpar] = False
+        
+    st.markdown("---")
+    dados_questao = res_data.get(questao_id, {})
+    historico = dados_questao.get("comentarios", [])
+    
+    status_global = "Resolvido"
+    for com in historico:
+        if "status_definido" in com:
+            status_global = com["status_definido"]
+            
+    badge_status = "🔴 PENDENTE" if status_global == "Pendente" else "🟢 RESOLVIDO"
+    
+    with st.expander(f"💬 Diálogo da Questão {questao_id} | Status: {badge_status}", expanded=(status_global == "Pendente")):
+        opcoes_status = ["Resolvido", "Pendente"]
+        idx_status_atual = opcoes_status.index(status_global) if status_global in opcoes_status else 0
+        
+        novo_status_clicado = st.radio(
+            f"Definir status para {questao_id}:",
+            options=opcoes_status, index=idx_status_atual, horizontal=True,
+            key=f"rad_status_{questao_id}_{ano_sel}", label_visibility="collapsed"
+        )
+        
+        if novo_status_clicado != status_global:
+            log_mudanca = {
+                "autor": "Sistema / " + usuario_atual,
+                "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "texto": f"ℹ️ Alterou o status do quesito para: **{novo_status_clicado.upper()}**.",
+                "status_definido": novo_status_clicado
+            }
+            historico.append(log_mudanca)
+            save_resp(questao_id, dados_questao.get("valor", ""), dados_questao.get("pontos", 0), dados_questao.get("link", ""), historico)
+            st.rerun()
+
+        if historico:
+            for idx, com in enumerate(historico):
+                col_balao, col_lixeira = st.columns([11, 1])
+                with col_balao:
+                    st.markdown(f"**{com.get('autor')}** ({com.get('data')}): {com.get('texto')}")
+                with col_lixeira:
+                    if st.button("🗑️", key=f"btn_del_com_{questao_id}_{idx}_{ano_sel}"):
+                        historico.pop(idx)
+                        save_resp(questao_id, dados_questao.get("valor", ""), dados_questao.get("pontos", 0), dados_questao.get("link", ""), historico)
+                        st.rerun()
+        
+        if st.session_state[key_estado_limpar]:
+            st.session_state[key_texto] = ""
+            st.session_state[key_estado_limpar] = False
+            
+        novo_texto = st.text_area("Digite sua mensagem:", key=key_texto, height=80, label_visibility="collapsed")
+        if st.button("Postar Comentário", key=f"btn_com_{questao_id}_{ano_sel}", type="primary"):
+            if novo_texto.strip():
+                historico.append({
+                    "autor": usuario_atual,
+                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "texto": novo_texto.strip(),
+                    "status_definido": status_global
+                })
+                save_resp(questao_id, dados_questao.get("valor", ""), dados_questao.get("pontos", 0), dados_questao.get("link", ""), historico)
+                st.session_state[key_estado_limpar] = True
+                st.rerun()
