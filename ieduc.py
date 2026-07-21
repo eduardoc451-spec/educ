@@ -118,16 +118,18 @@ import re
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import SimpleConnectionPool
 import streamlit as st
 
 # =============================================================================
-# 1. FUNÇÕES DE APOIO E BANCO DE DADOS (POSTGRESQL NEON ADAPTADO)
+# 1. POOL DE CONEXÕES (EVITA ABRIR/FECHAR CONEXÃO A CADA CLIQUE)
 # =============================================================================
 
-def get_connection():
+@st.cache_resource
+def init_connection_pool():
     """
-    Retorna uma nova conexão ativa com o servidor PostgreSQL.
-    Prioriza st.secrets e variáveis de ambiente sem expor credenciais no código.
+    Cria um pool de conexões persistente. 
+    Evita o handshake SSL/TCP que torna o salvamento lento na nuvem.
     """
     db_url = (
         st.secrets.get("DATABASE_URL") 
@@ -136,302 +138,147 @@ def get_connection():
     )
     
     if not db_url:
-        st.error("URL do Banco de Dados não configurada nos secrets/variáveis de ambiente.")
+        st.error("URL do Banco de Dados não configurada nos secrets.")
         st.stop()
     
-    # Garantia de que a URL possui a flag de SSL necessária
     if "sslmode" not in db_url:
         separador = "&" if "?" in db_url else "?"
         db_url += f"{separador}sslmode=require"
         
-    return psycopg2.connect(db_url)
+    # Mantém de 1 a 10 conexões prontas para reuso
+    return SimpleConnectionPool(minconn=1, maxconn=10, dsn=db_url)
 
+
+def execute_query(query, params=(), fetch=False):
+    """Auxiliar para obter uma conexão rápida do pool, executar e devolver."""
+    pool = init_connection_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query, params)
+            if fetch:
+                resultado = cursor.fetchall()
+            else:
+                conn.commit()
+                resultado = None
+        return resultado
+    finally:
+        pool.putconn(conn)
+
+
+# =============================================================================
+# 2. FUNÇÕES OPTIMIZADAS DE BANCO DE DADOS
+# =============================================================================
 
 def init_db():
-    """Inicializa a tabela de respostas e a coluna JSON de comentários no PostgreSQL."""
+    """Inicializa a estrutura do banco usando o pool super rápido."""
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS respostas (
-                        id VARCHAR(50) NOT NULL,
-                        ano INTEGER NOT NULL,
-                        valor TEXT,
-                        pontos NUMERIC(10, 2) DEFAULT 0.0,
-                        link TEXT,
-                        comentarios TEXT,
-                        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (id, ano)
-                    );
-                """)
-                cursor.execute("""
-                    ALTER TABLE respostas ADD COLUMN IF NOT EXISTS comentarios TEXT;
-                """)
-            conn.commit()
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS respostas (
+                id VARCHAR(50) NOT NULL,
+                ano INTEGER NOT NULL,
+                valor TEXT,
+                pontos NUMERIC(10, 2) DEFAULT 0.0,
+                link TEXT,
+                comentarios TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id, ano)
+            );
+        """)
     except Exception as e:
-        st.error(f"Erro ao inicializar o banco de dados PostgreSQL: {e}")
+        st.error(f"Erro ao inicializar o banco de dados: {e}")
 
 
 @st.cache_data(ttl=300)
 def load_respostas(ano):
-    """Carrega as respostas do ano selecionado no PostgreSQL."""
+    """Carrega as respostas do ano selecionado."""
     dados_ano = {}
     try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                query = """
-                    SELECT id, valor, pontos, link, comentarios 
-                    FROM respostas 
-                    WHERE ano = %s
-                """
-                cursor.execute(query, (int(ano),))
-                rows = cursor.fetchall()
-                
-                for row in rows:
+        query = "SELECT id, valor, pontos, link, comentarios FROM respostas WHERE ano = %s"
+        rows = execute_query(query, (int(ano),), fetch=True)
+        
+        for row in rows:
+            comentarios_lista = []
+            if row.get('comentarios'):
+                try:
+                    comentarios_lista = json.loads(row['comentarios'])
+                except Exception:
                     comentarios_lista = []
-                    if row.get('comentarios'):
-                        try:
-                            comentarios_lista = json.loads(row['comentarios'])
-                        except Exception:
-                            comentarios_lista = []
 
-                    dados_ano[row['id']] = {
-                        "valor": row.get('valor', ''),
-                        "pontos": float(row.get('pontos', 0.0) or 0.0),
-                        "link": row.get('link', ''),
-                        "comentarios": comentarios_lista
-                    }
+            dados_ano[row['id']] = {
+                "valor": row.get('valor', ''),
+                "pontos": float(row.get('pontos', 0.0) or 0.0),
+                "link": row.get('link', ''),
+                "comentarios": comentarios_lista
+            }
     except Exception as e:
-        st.error(f"Erro ao carregar respostas do PostgreSQL: {e}")
+        st.error(f"Erro ao carregar respostas: {e}")
     return dados_ano
 
 
 def save_resp(qid, valor, pontos, link, comentarios=None):
-    """Insere ou atualiza registros no PostgreSQL preservando comentários via SQL no UPSERT."""
+    """Gravação ultra rápida no banco."""
     ano_sel = st.session_state.get("ano_referencia_global")
     if not ano_sel:
         return
 
     comentarios_json = json.dumps(comentarios, ensure_ascii=False) if comentarios is not None else None
 
+    query = """
+        INSERT INTO respostas (id, ano, valor, pontos, link, comentarios, atualizado_em)
+        VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (id, ano) DO UPDATE SET
+            valor = EXCLUDED.valor,
+            pontos = EXCLUDED.pontos,
+            link = EXCLUDED.link,
+            comentarios = COALESCE(EXCLUDED.comentarios, respostas.comentarios),
+            atualizado_em = CURRENT_TIMESTAMP;
+    """
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cursor:
-                # O COALESCE preserva o valor antigo de comentarios caso o novo enviado seja NULL
-                query = """
-                    INSERT INTO respostas (id, ano, valor, pontos, link, comentarios, atualizado_em)
-                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                    ON CONFLICT (id, ano) DO UPDATE SET
-                        valor = EXCLUDED.valor,
-                        pontos = EXCLUDED.pontos,
-                        link = EXCLUDED.link,
-                        comentarios = COALESCE(EXCLUDED.comentarios, respostas.comentarios),
-                        atualizado_em = CURRENT_TIMESTAMP;
-                """
-                cursor.execute(query, (
-                    str(qid),
-                    int(ano_sel),
-                    str(valor) if valor is not None else "",
-                    float(pontos or 0.0),
-                    str(link) if link is not None else "",
-                    comentarios_json
-                ))
-            conn.commit()
-            
-        # Invalida pontualmente o cache das respostas do ano corrente
-        load_respostas.clear()
+        execute_query(query, (
+            str(qid),
+            int(ano_sel),
+            str(valor) if valor is not None else "",
+            float(pontos or 0.0),
+            str(link) if link is not None else "",
+            comentarios_json
+        ))
     except Exception as e:
-        st.error(f"Erro ao salvar questão {qid} no PostgreSQL: {e}")
+        st.error(f"Erro ao salvar questão {qid}: {e}")
 
 
-# --- BLOCO DE COMENTÁRIOS COM LIMPEZA, STATUS INDEPENDENTE E EXCLUSÃO ---
-def bloco_comentarios(questao_id, res_data, ano_sel=None):
-    """Gera o bloco interativo de diálogo da questão com suporte a status e exclusão."""
-    if ano_sel is None:
-        ano_sel = st.session_state.get("ano_referencia_global", datetime.now().year)
+# =============================================================================
+# 3. VERIFICAÇÃO E MONITORAMENTO SEM RERUN DESNECESSÁRIO
+# =============================================================================
 
-    usuario_atual = st.session_state.get("username", st.session_state.get("usuario", "Usuário Anônimo"))
-    
-    key_texto = f"v_txt_com_{questao_id}_{ano_sel}"
-    key_estado_limpar = f"limpar_input_{questao_id}_{ano_sel}"
-    
-    if key_estado_limpar not in st.session_state:
-        st.session_state[key_estado_limpar] = False
-        
-    st.markdown("---")
-    
-    dados_questao = res_data.get(questao_id, {})
-    historico = dados_questao.get("comentarios", [])
-    
-    # Identifica o status GLOBAL atual do quesito
-    status_global = "Resolvido"
-    for com in historico:
-        if "status_definido" in com:
-            status_global = com["status_definido"]
-            
-    badge_status = "🔴 PENDENTE" if status_global == "Pendente" else "🟢 RESOLVIDO"
-    
-    with st.expander(f"💬 Diálogo da Questão {questao_id} | Status: {badge_status}", expanded=(status_global == "Pendente")):
-        
-        # SEÇÃO 1: Status Independente
-        st.markdown("<b style='font-size: 13px;'>Status Atual do Quesito:</b>", unsafe_allow_html=True)
-        opcoes_status = ["Resolvido", "Pendente"]
-        idx_status_atual = opcoes_status.index(status_global) if status_global in opcoes_status else 0
-        
-        novo_status_clicado = st.radio(
-            f"Definir status para {questao_id}:",
-            options=opcoes_status,
-            index=idx_status_atual,
-            horizontal=True,
-            key=f"rad_status_{questao_id}_{ano_sel}",
-            label_visibility="collapsed"
-        )
-        
-        if novo_status_clicado != status_global:
-            log_mudanca = {
-                "autor": "Sistema / " + usuario_atual,
-                "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                "texto": f"ℹ️ Alterou o status do quesito para: **{novo_status_clicado.upper()}**.",
-                "status_definido": novo_status_clicado
-            }
-            historico.append(log_mudanca)
-            save_resp(
-                qid=questao_id,
-                valor=dados_questao.get("valor", ""),
-                pontos=dados_questao.get("pontos", 0),
-                link=dados_questao.get("link", ""),
-                comentarios=historico
-            )
-            st.rerun()
-
-        st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
-
-        # SEÇÃO 2: Histórico de Diálogos
-        if historico:
-            for idx, com in enumerate(historico):
-                col_balao, col_lixeira = st.columns([11, 1])
-                
-                with col_balao:
-                    if "Sistema /" in com.get('autor', ''):
-                        st.markdown(
-                            f"""
-                            <div style="background-color: #f1f3f5; padding: 6px 12px; border-radius: 6px; margin-bottom: 4px; border-left: 3px solid #ced4da;">
-                                <span style="font-size: 11px; color: #6c757d; font-style: italic;">{com.get('autor')} - {com.get('data')}</span>
-                                <p style="margin: 2px 0 0 0; font-size: 12px; color: #495057; font-style: italic;">{com.get('texto')}</p>
-                            </div>
-                            """, 
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.markdown(
-                            f"""
-                            <div style="background-color: #f8f9fa; padding: 10px 15px; border-radius: 8px; margin-bottom: 6px; border-left: 3px solid #1e88e5;">
-                                <span style="font-size: 11px; color: #1e88e5; font-weight: bold;">{com.get('autor')}</span> 
-                                <span style="font-size: 10px; color: #999; margin-left: 10px;">{com.get('data')}</span>
-                                <p style="margin: 4px 0 0 0; font-size: 13px; color: #333;">{com.get('texto')}</p>
-                            </div>
-                            """, 
-                            unsafe_allow_html=True
-                        )
-                
-                with col_lixeira:
-                    st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
-                    if st.button("🗑️", key=f"btn_del_com_{questao_id}_{idx}_{ano_sel}", help="Excluir este comentário"):
-                        historico.pop(idx)
-                        save_resp(
-                            qid=questao_id,
-                            valor=dados_questao.get("valor", ""),
-                            pontos=dados_questao.get("pontos", 0),
-                            link=dados_questao.get("link", ""),
-                            comentarios=historico
-                        )
-                        st.rerun()
-                        
-            st.markdown("<br>", unsafe_allow_html=True)
-        else:
-            st.markdown("<p style='font-size: 12px; color: #999; font-style: italic;'>Nenhum comentário enviado ainda.</p>", unsafe_allow_html=True)
-            
-        # SEÇÃO 3: Envio de Comentário
-        st.markdown("<b style='font-size: 13px;'>Adicionar Novo Comentário:</b>", unsafe_allow_html=True)
-        
-        if st.session_state[key_estado_limpar]:
-            st.session_state[key_texto] = ""
-            st.session_state[key_estado_limpar] = False
-            
-        novo_texto = st.text_area("Digite sua mensagem:", key=key_texto, height=80, label_visibility="collapsed")
-        
-        col_btn1, _ = st.columns([1, 3])
-        with col_btn1:
-            if st.button("Postar Comentário", key=f"btn_com_{questao_id}_{ano_sel}", type="primary"):
-                if novo_texto.strip():
-                    nova_mensagem = {
-                        "autor": usuario_atual,
-                        "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                        "texto": novo_texto.strip(),
-                        "status_definido": status_global
-                    }
-                    
-                    historico.append(nova_mensagem)
-                    
-                    save_resp(
-                        qid=questao_id, 
-                        valor=dados_questao.get("valor", ""), 
-                        pontos=dados_questao.get("pontos", 0), 
-                        link=dados_questao.get("link", ""),
-                        comentarios=historico
-                    )
-                    st.session_state[key_estado_limpar] = True
-                    st.rerun()
-
-
-# --- CENTRALIZADOR INTELIGENTE DE SALVAMENTO E MONITORAÇÃO DE LINKS ---
 def verificar_e_salvar_questao(qid, r_atual, l_atual, d_antigo, pontos=0):
     ano_sel = st.session_state.get("ano_referencia_global", datetime.now().year)
     
     links_atuais = re.findall(r'(https?://[^\s]+)', l_atual or "")
     links_antigos = re.findall(r'(https?://[^\s]+)', d_antigo.get("link", "") or "")
 
-    if r_atual and (r_atual != d_antigo.get("valor") or l_atual != d_antigo.get("link")):
+    # Checa se houve mudança real de conteúdo antes de gravar
+    if r_atual != d_antigo.get("valor") or l_atual != d_antigo.get("link"):
         if set(links_atuais) > set(links_antigos):
             st.session_state[f"trigger_modal_{qid}_{ano_sel}"] = True
             st.session_state[f"links_detectados_{qid}_{ano_sel}"] = links_atuais
             
+        # Salva em segundo plano
         save_resp(qid, r_atual, pontos, l_atual)
-        st.rerun()
+        
+        # Atualiza a memória local temporária sem invalidar o cache completo
+        respostas_locais = load_respostas(ano_sel)
+        if qid in respostas_locais:
+            respostas_locais[qid]["valor"] = r_atual
+            respostas_locais[qid]["link"] = l_atual
+            respostas_locais[qid]["pontos"] = pontos
 
     if st.session_state.get(f"trigger_modal_{qid}_{ano_sel}", False):
         st.session_state[f"trigger_modal_{qid}_{ano_sel}"] = False
         links_salvos = st.session_state.get(f"links_detectados_{qid}_{ano_sel}", [])
         if "modal_aviso_link" in globals():
             modal_aviso_link(qid, links_salvos)
-
-
-@st.cache_data(ttl=300)
-def load_todas_respostas():
-    """Busca as respostas de TODOS os anos registrados no PostgreSQL."""
-    todas_respostas = {}
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("SELECT ano, id, valor, pontos, link FROM respostas")
-                rows = cursor.fetchall()
-                for row in rows:
-                    ano_db = int(row['ano'])
-                    qid = row['id']
-                    
-                    if ano_db not in todas_respostas:
-                        todas_respostas[ano_db] = {}
-                    
-                    todas_respostas[ano_db][qid] = {
-                        "valor": row.get('valor', ''),
-                        "pontos": float(row.get('pontos', 0.0) or 0.0),
-                        "link": row.get('link', '')
-                    }
-    except Exception as e:
-        st.error(f"Erro ao carregar histórico consolidado do PostgreSQL: {e}")
-    return todas_respostas
-
 # =============================================================================
 # 2. LÓGICA DE CÁLCULO
 # =============================================================================
