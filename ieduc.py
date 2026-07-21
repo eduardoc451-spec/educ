@@ -902,6 +902,61 @@ def render_sidebar():
         
     return ano_sel, res_data, total_pts, faixa, cor
 
+# =============================================================================
+# COMPONENTE: BLOCO DE COMENTÁRIOS E HISTÓRICO
+# =============================================================================
+def bloco_comentarios(qid, res_data, ano_sel):
+    """
+    Exibe e gerencia os comentários/observações da equipe auditada para cada bloco/questão.
+    """
+    st.markdown("---")
+    st.subheader(f"💬 Comentários e Observações ({qid})")
+
+    # Recupera comentários atuais da questão
+    info_q = res_data.get(qid, {})
+    comentarios = info_q.get("comentarios", []) if isinstance(info_q, dict) else []
+
+    # Exibe comentários já salvos
+    if comentarios:
+        for idx, com in enumerate(comentarios):
+            autor = com.get("autor", "Usuário")
+            data_envio = com.get("data", "")
+            texto = com.get("texto", "")
+            st.info(f"**{autor}** *({data_envio})*:\n\n{texto}")
+    else:
+        st.caption("Nenhum comentário adicionado ainda.")
+
+    # Campo para adicionar novo comentário
+    novo_texto = st.text_area(
+        "Adicionar nota/comentário:", 
+        key=f"txt_com_{qid}_{ano_sel}",
+        placeholder="Escreva aqui observações sobre as evidências ou justificativas..."
+    )
+
+    if st.button("Enviar Comentário", key=f"btn_com_{qid}_{ano_sel}"):
+        if novo_texto.strip():
+            usuario_atual = st.session_state.get("usuario_logado", "Auditores/Gestor")
+            data_hoje = datetime.now().strftime("%d/%m/%Y %H:%M")
+            
+            novo_comentario = {
+                "autor": usuario_atual,
+                "data": data_hoje,
+                "texto": novo_texto.strip()
+            }
+            
+            # Adiciona ao histórico e salva
+            comentarios.append(novo_comentario)
+            
+            valor_atual = info_q.get("valor", "") if isinstance(info_q, dict) else ""
+            pontos_atuais = info_q.get("pontos", 0.0) if isinstance(info_q, dict) else 0.0
+            link_atual = info_q.get("link", "") if isinstance(info_q, dict) else ""
+
+            save_resp(qid, valor_atual, pontos_atuais, link_atual, comentarios)
+            st.success("Comentário salvo com sucesso!")
+            st.rerun()
+        else:
+            st.warning("Escreva um texto antes de enviar.")
+
 
 def mostrar_formulario_educ():
     init_db()
