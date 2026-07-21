@@ -1,7 +1,11 @@
+from io import BytesIO  # <-- Adicione esta linha no topo do ieduc.py
 import copy
-import streamlit as st
+import re
+import json
+from datetime import datetime, date
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import streamlit as st
 
 st.subheader("🔍 Diagnóstico de Conexão Neon")
 
