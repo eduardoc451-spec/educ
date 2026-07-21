@@ -153,7 +153,7 @@ def init_db():
     try:
         with get_connection() as conn:
             with conn.cursor() as cursor:
-                # Tabela adaptada para PostgreSQL
+                # Cria a tabela garantindo a PRIMARY KEY composta em (id, ano)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS respostas (
                         id VARCHAR(50) NOT NULL,
@@ -167,6 +167,13 @@ def init_db():
                         PRIMARY KEY (id, ano)
                     );
                 """)
+                
+                # Garante a coluna comentarios para bancos legados
+                cursor.execute("""
+                    ALTER TABLE respostas 
+                    ADD COLUMN IF NOT EXISTS comentarios JSONB;
+                """)
+                
                 conn.commit()
     except Exception as e:
         st.error(f"Erro ao inicializar o banco de dados no Postgres: {e}")
