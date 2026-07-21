@@ -274,6 +274,7 @@ def load_todas_respostas():
     except Exception as e:
         st.error(f"Erro ao carregar histórico consolidado do Postgres: {e}")
     return todas_respostas
+    
 # =============================================================================
 # 2. LÓGICA DE CÁLCULO
 # =============================================================================
