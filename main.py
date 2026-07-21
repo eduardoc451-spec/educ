@@ -12,8 +12,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-# 3. IMPORTS DE MÓDULOS LOCAIS (Agora funciona com segurança)
+# 3. IMPORTS DE MÓDULOS LOCAIS
 from database import init_db, bloco_comentarios, save_resp
+
+# Inicializa as tabelas do banco de dados no startup
+init_db()
 
 # Importar módulos locais com tratamento de erros dinâmico
 def import_local_module(module_name):
@@ -42,7 +45,7 @@ plano_acao = import_local_module("plano_acao")
 treinamento = import_local_module("treinamento")
 prazos_alertas = import_local_module("prazos_alertas")
 
-# --- INTEGRADO: Importação do módulo HAL 9000 ---
+# Módulo HAL 9000
 hal_core = import_local_module("hal")
 
 # Configuração da página
@@ -157,7 +160,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Inicialização do banco de dados simulado
+# Inicialização do estado e banco simulado
 if "users_db" not in st.session_state:
     st.session_state.users_db = {
         "jefferson.espanha": {"senha": "fodasse", "email": "jefferson@franciscomorato.sp.gov.br"}
@@ -174,7 +177,6 @@ if "authenticated" not in st.session_state:
 
 AVAILABLE_YEARS = [2024, 2025, 2026, 2027, 2028, 2029, 2030]
 
-# --- MODIFICADO: Atualizada a chave para o novo nome correspondente ---
 DIMENSIONS_DATA = {
     "i-Gov TI": {"img": "i_gov_ti.png", "desc": "Governança de Tecnologia da Informação."},
     "i-Educ": {"img": "i_educ.png", "desc": "Gestão da Educação Municipal"},
@@ -191,7 +193,6 @@ DIMENSIONS_DATA = {
 }
 
 def login_page():
-    """Página de login."""
     col1, col2, col3 = st.columns([1.1, 1.6, 1.1]) 
     with col2:
         logo_b64 = get_image_base64("iegm.png")
@@ -246,7 +247,6 @@ def login_page():
                     st.success(f"✔️ Usuário '{new_username}' cadastrado com sucesso! Senha inicial: 'pmfm1234'")
 
 def change_password_page():
-    """Tela intermediária obrigatória para alteração do primeiro acesso."""
     col1, col2, col3 = st.columns([1.1, 1.6, 1.1])
     with col2:
         st.markdown("<div style='text-align:center; padding: 20px;'><h3>🔄 Alteração Obrigatória de Senha</h3><p>Este é o seu primeiro acesso. Altere a sua senha padrão para continuar.</p></div>", unsafe_allow_html=True)
@@ -268,7 +268,6 @@ def change_password_page():
                 st.rerun()
 
 def dashboard_page():
-    """Página principal."""
     st.markdown(f'<div style="text-align: center; padding: 10px;"><h1 style="color: #001A4D;">IEG-M Francisco Morato</h1><p style="color: #003D99; font-weight: bold;">Bem-vindo, {st.session_state.username}!</p></div>', unsafe_allow_html=True)
 
     col_space, col_logout = st.columns([5, 1])
@@ -333,7 +332,6 @@ def dashboard_page():
         st.markdown('</div></div>', unsafe_allow_html=True)
 
 def dimension_page():
-    """Página de exibição dinâmica."""
     st.markdown("<script>setTimeout(function() { window.scrollTo(0, 0); }, 100);</script>", unsafe_allow_html=True)
     
     dimension = st.session_state.selected_dimension
@@ -354,7 +352,6 @@ def dimension_page():
 
     st.markdown("---")
 
-    # Roteamento central das subpáginas do ecossistema
     if dimension == "Administrador":
         if admin_core:
             admin_core.mostrar_painel_admin(year)
@@ -367,7 +364,6 @@ def dimension_page():
         else:
             st.error("Erro: Módulo 'biblioteca.py' não localizado.")
             
-    # --- Bloco dinâmico do HAL 9000 buscando de hal.py ---
     elif dimension == "HAL 9000":
         st.subheader("🔴 HAL 9000 — Inteligência Artificial")
         if hal_core:
@@ -383,7 +379,6 @@ def dimension_page():
             st.chat_input("Como posso ajudar hoje? (Modo Offline)")
             
     elif dimension == "i-Cidade" and icidade:
-        icidade.init_db()
         icidade.mostrar_formulario_cidade()
     elif dimension == "i-Gov TI" and igov:
         igov.mostrar_formulario_gov()
@@ -403,7 +398,6 @@ def dimension_page():
         else:
             st.error("Erro: Módulo 'iegmfinal.py' não localizado.")
             
-    # --- Nome correspondente ao card "Relatório de Atividades" ---
     elif dimension == "Relatório de Atividades":
         if atividade:
             if hasattr(atividade, 'mostrar_formulario_atividade'):
@@ -413,7 +407,6 @@ def dimension_page():
         else:
             st.error("Erro: Módulo 'atividade.py' não localizado.")
             
-    # --- Nome correspondente ao card "Plano de Ação" ---
     elif dimension == "Plano de Ação":
         if plano_acao:
             if hasattr(plano_acao, 'mostrar_formulario_plano_acao'):
@@ -425,7 +418,6 @@ def dimension_page():
         else:
             st.error("Erro: Módulo 'plano_acao.py' não localizado.")
 
-    # --- Bloco dinâmico correspondente ao card "Área de treinamento" ---
     elif dimension == "Área de treinamento":
         st.subheader("🎓 Área de Treinamento e Capacitação")
         if treinamento:
@@ -440,7 +432,6 @@ def dimension_page():
         else:
             st.error("Erro técnico: O arquivo 'treinamento.py' não foi detectado no sistema.")
             
-    # --- CORRIGIDO: Nome exato correspondente ao card "Prazos e Instruções de Preenchimento" ---
     elif dimension == "Prazos e Instruções de Preenchimento":
         st.subheader("⏰ Prazos e Instruções de Preenchimento")
         if prazos_alertas:
@@ -458,7 +449,7 @@ def dimension_page():
     else:
         st.info(f"Módulo {dimension} pronto para integração.")
 
-# Gerenciador de Estado de Telas do Streamlit
+# Gerenciador de Estado de Telas
 if not st.session_state.authenticated:
     login_page()
 else:
